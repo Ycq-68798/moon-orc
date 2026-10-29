@@ -50,7 +50,7 @@ fn parse_type(data : Bytes) -> OrcType raise OrcError {
 }
 
 ///|
-/// Parse an uncompressed or ZLIB-compressed ORC file from bytes.
+/// Parse an uncompressed, ZLIB- or Snappy-compressed ORC file from bytes.
 pub fn open(data : Bytes) -> OrcFile raise OrcError {
   let len = data.length()
   if len < 4 || data[0] != b'O' || data[1] != b'R' || data[2] != b'C' {
@@ -63,11 +63,11 @@ pub fn open(data : Bytes) -> OrcFile raise OrcError {
   let ps_start = len - 1 - ps_len
   let ps = fields(data[ps_start:len - 1].to_owned())
   let compression = number(ps, 2, 0)
-  if compression != 0 && compression != 1 {
+  if compression != 0 && compression != 1 && compression != 2 {
     raise Invalid("unsupported compression codec")
   }
   let block_size = number(ps, 3, 262144)
-  if compression == 1 && (block_size <= 0 || block_size > 8 * 1024 * 1024) {
+  if compression != 0 && (block_size <= 0 || block_size > 8 * 1024 * 1024) {
     raise Invalid("invalid compression block size")
   }
   let footer_len = number(ps, 1, -1)

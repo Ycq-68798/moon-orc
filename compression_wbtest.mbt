@@ -95,3 +95,76 @@ test "Arrow writes multiple ZLIB chunks in one data stream" {
   }
   assert_true(found)
 }
+
+///|
+test "Snappy raw blocks handle literal and all copy token forms" {
+  let copy1 : Bytes = [5, 0, b'a', 1, 1]
+  let copy2 : Bytes = [5, 0, b'a', 14, 1, 0]
+  let copy4 : Bytes = [5, 0, b'a', 15, 1, 0, 0, 0]
+  for block in [copy1, copy2, copy4] {
+    validate_snappy(block, 5)
+    assert_eq(@snappy.decompress(block), b"aaaaa")
+  }
+}
+
+///|
+test "Snappy rejects malformed and oversized blocks" {
+  let cases : Array[Bytes] = [
+    [],
+    [0x80],
+    [5, 0x10, b'a'], // truncated five-byte literal
+    [1, 1, 0], // copy offset zero
+    [1, 1, 1], // copy before first output byte
+    [1, 0xfc, 0xff, 0xff, 0xff, 0xff], // oversized 4-byte literal length
+    [1, 0, b'a', 0], // trailing data
+    [0x80, 0x80, 0x80, 0x01], // advertised output larger than limit
+  ]
+  for block in cases {
+    let rejected = try validate_snappy(block, 10) catch {
+      Invalid(_) => true
+    } noraise {
+      _ => false
+    }
+    assert_true(rejected)
+  }
+}
+
+///|
+test "Arrow Snappy data contains multiple compressed blocks" {
+  let file = open(fixture_snappy_v12_large())
+  let (ss, _) = streams(file, file.stripes[0])
+  let mut found = false
+  for stream in ss {
+    if stream.column == 1 && stream.kind == 1 {
+      let raw = file.bytes[stream.offset:stream.offset + stream.length].to_owned()
+      let c = Cursor::{ data: raw, pos: 0, }
+      let mut compressed = 0
+      while c.pos < raw.length() {
+        let header = c.byte() | (c.byte() << 8) | (c.byte() << 16)
+        let _ = c.take(header >> 1)
+        if (header & 1) == 0 {
+          compressed += 1
+        }
+      }
+      found = compressed > 1
+    }
+  }
+  assert_true(found)
+}
+
+///|
+test "Snappy ORC framing validates block payload" {
+  assert_eq(decompress_stream([7, 0, 0, b'a', b'b', b'c'], 2, 10), b"abc")
+  assert_eq(decompress_stream([10, 0, 0, 5, 0, b'a', 1, 1], 2, 10), b"aaaaa")
+  let truncated = try decompress_stream([4, 0, 0, 1, 1], 2, 10) catch {
+    Invalid(_) => true
+  } noraise {
+    _ => false
+  }
+  let too_large = try decompress_stream([2, 0, 0, 0x0b], 2, 10) catch {
+    Invalid(_) => true
+  } noraise {
+    _ => false
+  }
+  assert_true(truncated && too_large)
+}
