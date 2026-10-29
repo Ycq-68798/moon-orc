@@ -40,6 +40,7 @@ pub fn OrcFile::read_float_column(Self, String) -> Array[Float?] raise OrcError
 pub fn OrcFile::read_int_column(Self, String) -> Array[Int64?] raise OrcError
 pub fn OrcFile::read_int_list_column(Self, String) -> Array[Array[Int64?]?] raise OrcError
 pub fn OrcFile::read_string_column(Self, String) -> Array[String?] raise OrcError
+pub fn OrcFile::read_string_list_column(Self, String) -> Array[Array[String?]?] raise OrcError
 pub fn OrcFile::read_timestamp_column(Self, String) -> Array[OrcTimestamp?] raise OrcError
 pub fn OrcFile::read_timestamp_instant_column(Self, String) -> Array[OrcTimestamp?] raise OrcError
 

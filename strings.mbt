@@ -51,6 +51,36 @@ fn dictionary_values(
 }
 
 ///|
+fn string_stripe_values(
+  file : OrcFile,
+  ss : Array[Stream],
+  column : Int,
+  encoding : ColumnEncoding,
+  count : Int,
+) -> Array[String] raise OrcError {
+  if encoding.kind < 0 || encoding.kind > 3 {
+    raise Invalid("unsupported string encoding")
+  }
+  let v2 = encoding.kind == 2 || encoding.kind == 3
+  let dictionary = encoding.kind == 1 || encoding.kind == 3
+  let lengths_data = get_stream(file, ss, column, 2).unwrap_or(b"")
+  let value_data = get_stream(file, ss, column, 1).unwrap_or(b"")
+  if dictionary {
+    if encoding.dictionary_size > 10000000 {
+      raise Invalid("dictionary exceeds 10 million entry limit")
+    }
+    let dictionary_data = get_stream(file, ss, column, 3).unwrap_or(b"")
+    let lengths = unsigned_rle(lengths_data, encoding.dictionary_size, v2)
+    let dict = decode_string_values(dictionary_data, lengths)
+    let ids = unsigned_rle(value_data, count, v2)
+    dictionary_values(dict, ids)
+  } else {
+    let lengths = unsigned_rle(lengths_data, count, v2)
+    decode_string_values(value_data, lengths)
+  }
+}
+
+///|
 /// Read a top-level STRING, VARCHAR or CHAR column, preserving nulls and
 /// the UTF-8 text stored by the writer, including trailing spaces.
 pub fn OrcFile::read_string_column(
@@ -85,9 +115,6 @@ pub fn OrcFile::read_string_column(
       raise Invalid("missing column encoding")
     }
     let encoding = encodings[column]
-    if encoding.kind < 0 || encoding.kind > 3 {
-      raise Invalid("unsupported string encoding")
-    }
     let present = match get_stream(file, ss, column, 0) {
       Some(data) => bits(data, stripe.rows)
       None => [ for _ in 0..<stripe.rows => true ]
@@ -98,23 +125,7 @@ pub fn OrcFile::read_string_column(
         count += 1
       }
     }
-    let v2 = encoding.kind == 2 || encoding.kind == 3
-    let dictionary = encoding.kind == 1 || encoding.kind == 3
-    let lengths_data = get_stream(file, ss, column, 2).unwrap_or(b"")
-    let value_data = get_stream(file, ss, column, 1).unwrap_or(b"")
-    let values = if dictionary {
-      if encoding.dictionary_size > 10000000 {
-        raise Invalid("dictionary exceeds 10 million entry limit")
-      }
-      let dictionary_data = get_stream(file, ss, column, 3).unwrap_or(b"")
-      let lengths = unsigned_rle(lengths_data, encoding.dictionary_size, v2)
-      let dict = decode_string_values(dictionary_data, lengths)
-      let ids = unsigned_rle(value_data, count, v2)
-      dictionary_values(dict, ids)
-    } else {
-      let lengths = unsigned_rle(lengths_data, count, v2)
-      decode_string_values(value_data, lengths)
-    }
+    let values = string_stripe_values(file, ss, column, encoding, count)
     let mut pos = 0
     for p in present {
       if p {
