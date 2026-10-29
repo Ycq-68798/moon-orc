@@ -24,6 +24,8 @@ pub struct OrcFile {
   rows : Int
   stripes : Array[Stripe]
   types : Array[OrcType]
+  decimal_precision : Array[Int]
+  decimal_scale : Array[Int]
 }
 
 ///|
@@ -83,6 +85,8 @@ pub fn open(data : Bytes) -> OrcFile raise OrcError {
   let footer = fields(footer_data)
   let stripes = []
   let types = []
+  let decimal_precision = []
+  let decimal_scale = []
   for f in footer {
     if f.number == 3 && f.wire == 2 {
       let s = fields(f.bytes)
@@ -108,6 +112,9 @@ pub fn open(data : Bytes) -> OrcFile raise OrcError {
       stripes.push(stripe)
     } else if f.number == 4 && f.wire == 2 {
       types.push(parse_type(f.bytes))
+      let type_fields = fields(f.bytes)
+      decimal_precision.push(number(type_fields, 5, -1))
+      decimal_scale.push(number(type_fields, 6, -1))
     }
   }
   if types.length() == 0 || types[0].kind != 12 {
@@ -137,5 +144,14 @@ pub fn open(data : Bytes) -> OrcFile raise OrcError {
       raise Invalid("invalid stripe row count")
     }
   }
-  { bytes: data, compression, block_size, rows, stripes, types, }
+  {
+    bytes: data,
+    compression,
+    block_size,
+    rows,
+    stripes,
+    types,
+    decimal_precision,
+    decimal_scale,
+  }
 }

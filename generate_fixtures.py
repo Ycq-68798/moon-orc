@@ -9,6 +9,7 @@ if sys.platform == 'win32' and not os.environ.get('TZDIR'):
         raise RuntimeError('Install tzdata or set TZDIR to an IANA zoneinfo directory') from exc
     os.environ['TZDIR'] = str(Path(tzdata.__file__).parent / 'zoneinfo')
 import json
+from decimal import Decimal
 import math
 import struct
 import pyarrow as pa
@@ -298,7 +299,7 @@ for codec in ('uncompressed', 'zlib', 'snappy'):
 
 # Truncate selected stream while rebuilding lengths so public readers must
 # reject the malformed stream rather than failing only on file framing.
-def truncate_primitive_stream(data, column, stream_kind):
+def rewrite_primitive_stream(data, column, stream_kind, transform):
     ps_start = len(data) - 1 - data[-1]
     ps = _fields(data[ps_start:-1])
     footer_start = ps_start - _get(ps, 1)
@@ -318,7 +319,7 @@ def truncate_primitive_stream(data, column, stream_kind):
             source += length
             if _get(desc, 1) == stream_kind and _get(desc, 2) == column:
                 assert length > 0
-                payload = payload[:-1]
+                payload = transform(payload)
                 _put(desc, 3, len(payload))
                 field[2] = _emit(desc)
                 found = True
@@ -334,6 +335,9 @@ def truncate_primitive_stream(data, column, stream_kind):
     _put(ps, 1, len(new_footer))
     new_ps = _emit(ps)
     return (data[:offset] + body + new_sf + data[sf_start + stripe_footer_length:footer_start] + new_footer + new_ps + bytes([len(new_ps)]))
+
+def truncate_primitive_stream(data, column, stream_kind):
+    return rewrite_primitive_stream(data, column, stream_kind, lambda payload: payload[:-1])
 
 bad_primitive_cases = {
     'bool_data': truncate_primitive_stream(primitive_cases['v012_uncompressed'], 1, 1),
@@ -472,9 +476,68 @@ bad_timestamp_cases = {
     'missing_zone': rewrite_timestamp_zone(timestamp_cases['v012_uncompressed'], None),
     'epoch_fraction': encode(pa.table({'wall': pa.array([1], type=pa.timestamp('ns'))}), compression='uncompressed', file_version='0.12'),
 }
+# DECIMAL fixtures preserve declared scale and exact values across both formats.
+decimal_values = [Decimal('-99999999999999.9999'), Decimal('-1.0001'), Decimal('0.0000'), Decimal('0.0001'), Decimal('99999999999999.9999'), None]
+decimal_table = pa.table({
+    'amount': pa.array(decimal_values, type=pa.decimal128(18, 4)),
+    'all_null': pa.array([None] * len(decimal_values), type=pa.decimal128(8, 2)),
+    'wide': pa.array([Decimal('1')] * len(decimal_values), type=pa.decimal128(38, 0)),
+    'small': pa.array([Decimal('-9'), Decimal('-1'), Decimal('0'), Decimal('1'), Decimal('9'), None], type=pa.decimal128(1, 0)),
+    'frac': pa.array([Decimal('-0.999999999999999999'), Decimal('-0.1'), Decimal('0'), Decimal('0.1'), Decimal('0.999999999999999999'), None], type=pa.decimal128(18, 18)),
+})
+decimal_cases = {}
+for version in ('0.11', '0.12'):
+    for codec in ('uncompressed', 'zlib', 'snappy'):
+        data = encode(decimal_table, compression=codec, file_version=version)
+        result = orc.read_table(pa.BufferReader(data))
+        assert result.column('amount').to_pylist() == decimal_values
+        assert result.column('all_null').null_count == len(decimal_values)
+        for name in ('small', 'frac', 'wide'):
+            assert result.column(name).to_pylist() == decimal_table.column(name).to_pylist()
+        decimal_cases['v' + version.replace('.', '') + '_' + codec] = data
+multi_decimal_values = [None if i % 7 == 0 else Decimal(i - 1000).scaleb(-4) for i in range(2000)]
+decimal_multi_table = pa.table({'amount': pa.array(multi_decimal_values, type=pa.decimal128(18, 4))})
+for codec in ('uncompressed', 'zlib', 'snappy'):
+    source = decimal_multi_table
+    if codec != 'uncompressed':
+        source = source.append_column('pad', pa.array([str(i) + ':' + 'x' * 64 for i in range(2000)]))
+    data = encode(source, compression=codec, file_version='0.12', stripe_size=128, batch_size=256)
+    assert orc.ORCFile(pa.BufferReader(data)).nstripes > 1
+    assert orc.read_table(pa.BufferReader(data)).column('amount').to_pylist() == multi_decimal_values
+    decimal_cases['multi_' + codec] = data
+def rewrite_decimal_schema(data, precision, scale):
+    ps_start = len(data) - 1 - data[-1]
+    ps = _fields(data[ps_start:-1])
+    footer_start = ps_start - _get(ps, 1)
+    footer = _fields(data[footer_start:ps_start])
+    schema_field = [field for field in footer if field[0] == 4][1]
+    schema = _fields(schema_field[2])
+    _put(schema, 5, precision)
+    _put(schema, 6, scale)
+    schema_field[2] = _emit(schema)
+    new_footer = _emit(footer)
+    _put(ps, 1, len(new_footer))
+    new_ps = _emit(ps)
+    return data[:footer_start] + new_footer + new_ps + bytes([len(new_ps)])
+
+bad_decimal_cases = {
+    'data': truncate_primitive_stream(decimal_cases['v012_uncompressed'], 1, 1),
+    'scale': truncate_primitive_stream(decimal_cases['v012_uncompressed'], 1, 5),
+    'present': truncate_primitive_stream(decimal_cases['v012_uncompressed'], 1, 0),
+    'precision': rewrite_decimal_schema(decimal_cases['v012_uncompressed'], 2, 1),
+    'scale_mismatch': rewrite_decimal_schema(decimal_cases['v012_uncompressed'], 18, 3),
+    'bad_schema': rewrite_decimal_schema(decimal_cases['v012_uncompressed'], 2, 3),
+    'overflow': rewrite_primitive_stream(decimal_cases['v012_uncompressed'], 1, 1, lambda data: b'\xff' * 10 + data),
+    'trailing': rewrite_primitive_stream(decimal_cases['v012_uncompressed'], 1, 1, lambda data: data + b'\x00'),
+}
 out = '// Generated by generate_fixtures.py using Apache Arrow; do not hand-edit.\n'
 for name, data in [('fixture_11', v11), ('fixture_12', v12), ('fixture_zlib', zlib), ('fixture_zlib12', zlib12), ('fixture_long_gap', long_gap), ('fixture_snappy', snappy), ('fixture_snappy12', snappy12), ('fixture_zstd', zstd), ('fixture_multi', multi), ('fixture_zlib_multi', zlib_multi), ('fixture_zlib_v12_large', zlib_v12_large), ('fixture_snappy_v12_large', snappy_v12_large)]:
     out += f'\n///|\nfn {name}() -> Bytes {{\n  {literal(data)}\n}}\n'
+
+for name, data in decimal_cases.items():
+    out += f'\n///|\nfn fixture_decimal_{name}() -> Bytes {{\n  {literal(data)}\n}}\n'
+for name, data in bad_decimal_cases.items():
+    out += f'\n///|\nfn fixture_bad_decimal_{name}() -> Bytes {{\n  {literal(data)}\n}}\n'
 
 for name, data in timestamp_cases.items():
     out += f'\n///|\nfn fixture_timestamp_{name}() -> Bytes {{\n  {literal(data)}\n}}\n'

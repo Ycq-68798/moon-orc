@@ -10,6 +10,11 @@ pub suberror OrcError {
 }
 
 // Types and methods
+pub(all) struct OrcDecimal {
+  unscaled : Int64
+  scale : Int
+}
+
 pub struct OrcFile {
   bytes : Bytes
   compression : Int
@@ -17,10 +22,13 @@ pub struct OrcFile {
   rows : Int
   stripes : Array[Stripe]
   types : Array[OrcType]
+  decimal_precision : Array[Int]
+  decimal_scale : Array[Int]
 }
 pub fn OrcFile::read_binary_column(Self, String) -> Array[Bytes?] raise OrcError
 pub fn OrcFile::read_bool_column(Self, String) -> Array[Bool?] raise OrcError
 pub fn OrcFile::read_date_column(Self, String) -> Array[Int?] raise OrcError
+pub fn OrcFile::read_decimal_column(Self, String) -> Array[OrcDecimal?] raise OrcError
 pub fn OrcFile::read_double_column(Self, String) -> Array[Double?] raise OrcError
 pub fn OrcFile::read_float_column(Self, String) -> Array[Float?] raise OrcError
 pub fn OrcFile::read_int_column(Self, String) -> Array[Int64?] raise OrcError
