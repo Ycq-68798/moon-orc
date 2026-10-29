@@ -5,9 +5,9 @@ A MoonBit reader for a deliberately limited, interoperable subset of Apache ORC.
 ## Current support
 
 - In-memory `Bytes` input; uncompressed or ZLIB-compressed, unencrypted ORC. File and stripe metadata use protobuf.
-- `BYTE` (signed 8-bit), `SHORT`, `INT`, and `LONG`, returned as nullable `Int64` values. Byte RLE is supported for ORC 0.11 and 0.12; other integers require direct RLEv1 (ORC 0.11). Multiple stripes and all-null columns are supported.
+- `BYTE` (signed 8-bit), `SHORT`, `INT`, and `LONG`, returned as nullable `Int64` values. Byte RLE and direct integer RLEv1 / RLEv2 are supported, including short repeat, direct, delta and patched base. Multiple stripes and all-null columns are supported.
 - File size/offsets and row counts are currently limited to signed 32-bit values; row count is limited to 10 million while reading is in-memory.
-- Snappy, Zstandard and other compression codecs, RLEv2 integers, strings, nested data, predicate pushdown, writing and encrypted data are not implemented. Unsupported cases return `OrcError`.
+- Snappy, Zstandard and other compression codecs, strings, nested data, predicate pushdown, writing and encrypted data are not implemented. RLEv2 patched-base runs with main width plus patch width above 64 bits and variable-delta runs with zero first delta are rejected. Unsupported or malformed cases return `OrcError`.
 
 ```moonbit nocheck
 // Within a package that imports the module as @orc, obtain the bytes using
@@ -41,11 +41,22 @@ moon run cmd/main --target native -- sample.orc
 
 The CLI reports the row count, stripe count and top-level schema of an uncompressed or ZLIB-compressed ORC file. `sample.orc` is an Apache Arrow-generated fixture included in this repository. The executable uses `moonbitlang/x/fs`; the core reader accepts in-memory bytes and uses `mizchi/zlib` for DEFLATE decompression. A compressed block may expand to at most 8 MiB, and a decompressed stream is limited to 64 MiB.
 
-`interop_wbtest.mbt` contains files generated and independently read by Apache Arrow / PyArrow 26.0.0. They check signed 8/16/32/64-bit values, nulls, the minimum and maximum 64-bit integers, 20 stripes, projection, ZLIB-compressed footers and column streams, a 300,000-row multi-block ZLIB file, and rejection of unsupported RLEv2. `sample.orc` and the embedded test fixtures can be regenerated with Python and `pyarrow==26.0.0`:
+`interop_wbtest.mbt` contains files generated and independently read by Apache Arrow / PyArrow 26.0.0. They check signed 8/16/32/64-bit values, nulls, the minimum and maximum 64-bit integers, 20 stripes, projection, ZLIB-compressed footers and column streams, 300,000-row multi-block ZLIB files for ORC 0.11 and 0.12, and every RLEv2 encoding. Tests also use the Apache ORC specification examples and check truncated, overflowing and invalid patch streams. A synthetic long-gap patched-base ORC file is read independently by Arrow; its file statistics still describe the zero-filled source column, so it is used only to test decoding. `sample.orc` and the embedded test fixtures can be regenerated with Python and `pyarrow==26.0.0`:
 
 ```shell
 python generate_fixtures.py
 moon test --target all
+```
+
+With PyArrow 26.0.0, the following writer/reader round trip returned `1024` at position 510 rather than the original `1000000000` on the test machine. The test suite therefore uses the independently read synthetic long-gap fixture described above for this boundary:
+
+```python
+import pyarrow as pa
+import pyarrow.orc as orc
+v = [1000000000 if i in (3, 510) else 1000 + (i * 17) % 32 for i in range(512)]
+b = pa.BufferOutputStream()
+orc.write_table(pa.table({"x": pa.array(v, type=pa.int64())}), b, file_version="0.12", compression="uncompressed")
+print(orc.read_table(pa.BufferReader(b.getvalue())).column("x")[510].as_py())
 ```
 
 Reference: [Apache ORC specification](https://orc.apache.org/specification/ORCv1/).

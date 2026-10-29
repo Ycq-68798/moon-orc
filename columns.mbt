@@ -153,8 +153,8 @@ fn get_stream(
 }
 
 ///|
-/// Read a top-level integer column as nullable signed 64-bit values. ORC 0.11
-/// direct RLEv1 is supported, along with byte columns in ORC 0.12.
+/// Read a top-level integer column as nullable signed 64-bit values.
+/// RLEv1 and RLEv2 integer streams and byte RLE are supported.
 pub fn OrcFile::read_int_column(
   file : OrcFile,
   name : String,
@@ -186,8 +186,7 @@ pub fn OrcFile::read_int_column(
     if column >= encodings.length() {
       raise Invalid("missing column encoding")
     }
-    if (kind != 1 && encodings[column] != 0) ||
-      (kind == 1 && encodings[column] != 0 && encodings[column] != 2) {
+    if encodings[column] != 0 && encodings[column] != 2 {
       raise Invalid("unsupported integer column encoding")
     }
     let present = match get_stream(file, ss, column, 0) {
@@ -209,8 +208,10 @@ pub fn OrcFile::read_int_column(
       [
         for v in raw => Int64::from_int(if v >= 128 { v - 256 } else { v })
       ]
-    } else {
+    } else if encodings[column] == 0 {
       int_rle(data, count)
+    } else {
+      int_rle_v2(data, count)
     }
     let mut value_index = 0
     for p in present {
