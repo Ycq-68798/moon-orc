@@ -23,7 +23,7 @@ keywords = [ ]
 
 preferred_target = "wasm"
 
-description = "ORC integer and string reader with ZLIB and Snappy support"
+description = "ORC primitive column reader with ZLIB and Snappy support"
 
 import {
   "moonbitlang/x@0.5.5",

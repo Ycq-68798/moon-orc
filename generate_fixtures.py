@@ -1,5 +1,7 @@
 from pathlib import Path
 import json
+import math
+import struct
 import pyarrow as pa
 import pyarrow.orc as orc
 
@@ -233,9 +235,112 @@ text_cases['bad_utf8'] = corrupt_data_stream(text_cases['v12_direct'])
 text_cases['bad_dictionary_index'] = corrupt_data_stream(text_cases['v12_dict'], fill_all=True)
 
 
+
+flags = [True, False, None, True, False, True, False, None, True, False, True, False]
+float_values = [0.0, -0.0, 1.5, -2.25, float('inf'), float('-inf'), float('nan'), None, 2**-149, 3.4028234663852886e38, 0.5, -1.0]
+double_values = [0.0, -0.0, 1.5, -2.25, float('inf'), float('-inf'), float('nan'), None, 2**-1074, 1.7976931348623157e308, 0.5, -1.0]
+primitive_table = pa.table({
+    'flag': pa.array(flags, type=pa.bool_()),
+    'f': pa.array(float_values, type=pa.float32()),
+    'd': pa.array(double_values, type=pa.float64()),
+    'empty_bool': pa.array([None] * len(flags), type=pa.bool_()),
+    'empty_float': pa.array([None] * len(flags), type=pa.float32()),
+    'empty_double': pa.array([None] * len(flags), type=pa.float64()),
+})
+def float_bits(v, bits):
+    return int.from_bytes(struct.pack('<f' if bits == 32 else '<d', v), 'little')
+def check_primitives(table, actual):
+    assert actual.column('flag').to_pylist() == table.column('flag').to_pylist()
+    for col, width in [('f', 32), ('d', 64)]:
+        for x, y in zip(table.column(col).to_pylist(), actual.column(col).to_pylist()):
+            if x is None:
+                assert y is None
+            elif math.isnan(x):
+                assert math.isnan(y)
+            else:
+                assert float_bits(x, width) == float_bits(y, width)
+    for col in ('empty_bool', 'empty_float', 'empty_double'):
+        assert actual.column(col).to_pylist() == table.column(col).to_pylist()
+
+primitive_cases = {}
+for version in ('0.11', '0.12'):
+    for codec in ('uncompressed', 'zlib', 'snappy'):
+        sink = pa.BufferOutputStream()
+        orc.write_table(primitive_table, sink, compression=codec, file_version=version)
+        data = sink.getvalue().to_pybytes()
+        check_primitives(primitive_table, orc.read_table(pa.BufferReader(data)))
+        primitive_cases['v' + version.replace('.', '') + '_' + codec] = data
+primitive_multi_table = pa.table({
+    'flag': pa.array([None if i % 7 == 0 else i % 2 == 0 for i in range(2000)], type=pa.bool_()),
+    'f': pa.array([None if i % 11 == 0 else (i % 17 - 8) * 0.5 for i in range(2000)], type=pa.float32()),
+    'd': pa.array([None if i % 13 == 0 else (i % 31 - 15) * 0.125 for i in range(2000)], type=pa.float64()),
+})
+for codec in ('uncompressed', 'zlib', 'snappy'):
+    sink = pa.BufferOutputStream()
+    source = primitive_multi_table
+    if codec != 'uncompressed':
+        source = source.append_column('pad', pa.array([str(i) + ':' + 'x' * 64 for i in range(2000)]))
+    orc.write_table(source, sink, compression=codec, file_version='0.12', stripe_size=128, batch_size=256)
+    data = sink.getvalue().to_pybytes()
+    assert orc.read_table(pa.BufferReader(data)).equals(source)
+    assert orc.ORCFile(pa.BufferReader(data)).nstripes > 1
+    primitive_cases['multi_' + codec] = data
+
+
+# Truncate selected stream while rebuilding lengths so public readers must
+# reject the malformed stream rather than failing only on file framing.
+def truncate_primitive_stream(data, column, stream_kind):
+    ps_start = len(data) - 1 - data[-1]
+    ps = _fields(data[ps_start:-1])
+    footer_start = ps_start - _get(ps, 1)
+    footer = _fields(data[footer_start:ps_start])
+    stripe = _fields(_get(footer, 3))
+    offset, index_length, data_length, stripe_footer_length = (_get(stripe, n) for n in (1, 2, 3, 4))
+    sf_start = offset + index_length + data_length
+    stripe_footer = _fields(data[sf_start:sf_start + stripe_footer_length])
+    source = offset
+    parts = []
+    found = False
+    for field in stripe_footer:
+        if field[0] == 1:
+            desc = _fields(field[2])
+            length = _get(desc, 3)
+            payload = data[source:source + length]
+            source += length
+            if _get(desc, 1) == stream_kind and _get(desc, 2) == column:
+                assert length > 0
+                payload = payload[:-1]
+                _put(desc, 3, len(payload))
+                field[2] = _emit(desc)
+                found = True
+            parts.append(payload)
+    assert found
+    body = b''.join(parts)
+    new_sf = _emit(stripe_footer)
+    _put(stripe, 3, len(body) - index_length)
+    _put(stripe, 4, len(new_sf))
+    _put(footer, 3, _emit(stripe))
+    _put(footer, 2, offset + len(body) + len(new_sf))
+    new_footer = _emit(footer)
+    _put(ps, 1, len(new_footer))
+    new_ps = _emit(ps)
+    return (data[:offset] + body + new_sf + data[sf_start + stripe_footer_length:footer_start] + new_footer + new_ps + bytes([len(new_ps)]))
+
+bad_primitive_cases = {
+    'bool_data': truncate_primitive_stream(primitive_cases['v012_uncompressed'], 1, 1),
+    'bool_present': truncate_primitive_stream(primitive_cases['v012_uncompressed'], 1, 0),
+    'float_data': truncate_primitive_stream(primitive_cases['v012_uncompressed'], 2, 1),
+    'double_data': truncate_primitive_stream(primitive_cases['v012_uncompressed'], 3, 1),
+}
 out = '// Generated by generate_fixtures.py using Apache Arrow; do not hand-edit.\n'
 for name, data in [('fixture_11', v11), ('fixture_12', v12), ('fixture_zlib', zlib), ('fixture_zlib12', zlib12), ('fixture_long_gap', long_gap), ('fixture_snappy', snappy), ('fixture_snappy12', snappy12), ('fixture_zstd', zstd), ('fixture_multi', multi), ('fixture_zlib_multi', zlib_multi), ('fixture_zlib_v12_large', zlib_v12_large), ('fixture_snappy_v12_large', snappy_v12_large)]:
     out += f'\n///|\nfn {name}() -> Bytes {{\n  {literal(data)}\n}}\n'
+
+for name, data in bad_primitive_cases.items():
+    out += f'\n///|\nfn fixture_primitive_bad_{name}() -> Bytes {{\n  {literal(data)}\n}}\n'
+
+for name, data in primitive_cases.items():
+    out += f'\n///|\nfn fixture_primitive_{name}() -> Bytes {{\n  {literal(data)}\n}}\n'
 
 for name, data in text_cases.items():
     out += f'\n///|\nfn fixture_text_{name}() -> Bytes {{\n  {literal(data)}\n}}\n'
@@ -305,6 +410,63 @@ test \"Apache Arrow {suffix} string projection\" {{
   }}
 }}
 """
+out += """
+///|
+test "reject truncated primitive streams" {
+  let a = open(fixture_primitive_bad_bool_data())
+  let b = open(fixture_primitive_bad_bool_present())
+  let c = open(fixture_primitive_bad_float_data())
+  let d = open(fixture_primitive_bad_double_data())
+  let bad_bool = try a.read_bool_column("flag") catch { Invalid(_) => true } noraise { _ => false }
+  let bad_present = try b.read_bool_column("flag") catch { Invalid(_) => true } noraise { _ => false }
+  let bad_float = try c.read_float_column("f") catch { Invalid(_) => true } noraise { _ => false }
+  let bad_double = try d.read_double_column("d") catch { Invalid(_) => true } noraise { _ => false }
+  let bad_type = try d.read_double_column("f") catch { Invalid(_) => true } noraise { _ => false }
+  let missing = try d.read_bool_column("missing") catch { Invalid(_) => true } noraise { _ => false }
+  assert_true(bad_bool && bad_present && bad_float && bad_double && bad_type && missing)
+}
+"""
+for name in primitive_cases:
+    if name.startswith('multi_'):
+        out += f"""
+///|
+test \"Apache Arrow primitive {name}\" {{
+  let file = open(fixture_primitive_{name}())
+  assert_true(file.stripes.length() > 1)
+  let flags = file.read_bool_column(\"flag\")
+  let floats = file.read_float_column(\"f\")
+  let doubles = file.read_double_column(\"d\")
+  for i in 0..<2000 {{
+    assert_eq(flags[i], if i % 7 == 0 {{ None }} else {{ Some(i % 2 == 0) }})
+    assert_eq(floats[i], if i % 11 == 0 {{ None }} else {{ Some(Float::from_int(i % 17 - 8) * (0.5 : Float)) }})
+    assert_eq(doubles[i], if i % 13 == 0 {{ None }} else {{ Some(Double::from_int(i % 31 - 15) * 0.125) }})
+  }}
+}}
+"""
+        continue
+    expected_flags = '[' + ', '.join('None' if x is None else 'Some(true)' if x else 'Some(false)' for x in flags) + ']'
+    out += f"""
+///|
+test \"Apache Arrow primitive {name}\" {{
+  let file = open(fixture_primitive_{name}())
+  assert_eq(file.read_bool_column(\"flag\"), {expected_flags})
+  assert_eq(file.read_bool_column(\"empty_bool\"), [for _ in 0..<12 => None])
+  assert_eq(file.read_float_column(\"empty_float\"), [for _ in 0..<12 => None])
+  assert_eq(file.read_double_column(\"empty_double\"), [for _ in 0..<12 => None])
+  let floats = file.read_float_column(\"f\")
+  let doubles = file.read_double_column(\"d\")
+"""
+    for col, values, width in [('floats', float_values, 32), ('doubles', double_values, 64)]:
+        for i, val in enumerate(values):
+            if val is None:
+                out += f'  assert_true({col}[{i}] is None)\n'
+            elif math.isnan(val):
+                out += f'  match {col}[{i}] {{ Some(value) => assert_true(value.is_nan()); None => fail(\"expected NaN\") }}\n'
+            else:
+                literal_bits = f'0x{float_bits(val, width):x}' + ('U' if width == 32 else 'UL')
+                method = 'reinterpret_as_uint' if width == 32 else 'reinterpret_as_uint64'
+                out += f'  match {col}[{i}] {{ Some(value) => assert_eq(value.{method}(), {literal_bits}); None => fail("expected value") }}\n' 
+    out += '}\n'
 for name, (case_values, kind) in cases.items():
     out += f"""
 ///|
