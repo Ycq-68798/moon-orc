@@ -1,0 +1,37 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "Ycq-68798/moon-orc"
+
+// Values
+pub fn open(Bytes) -> OrcFile raise OrcError
+
+// Errors
+pub suberror OrcError {
+  Invalid(String)
+}
+
+// Types and methods
+pub struct OrcFile {
+  bytes : Bytes
+  rows : Int
+  stripes : Array[Stripe]
+  types : Array[OrcType]
+}
+pub fn OrcFile::read_int_column(Self, String) -> Array[Int64?] raise OrcError
+
+pub(all) struct OrcType {
+  kind : Int
+  children : Array[Int]
+  names : Array[String]
+}
+
+pub(all) struct Stripe {
+  offset : Int
+  index_length : Int
+  data_length : Int
+  footer_length : Int
+  rows : Int
+}
+
+// Type aliases
+
+// Traits

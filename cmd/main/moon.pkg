@@ -1,0 +1,7 @@
+import {
+  "Ycq-68798/moon-orc" @orc,
+  "moonbitlang/core/env",
+  "moonbitlang/x/fs",
+}
+
+pkgtype(kind: "executable")
