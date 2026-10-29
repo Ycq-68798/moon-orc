@@ -25,6 +25,13 @@ pub fn OrcFile::read_double_column(Self, String) -> Array[Double?] raise OrcErro
 pub fn OrcFile::read_float_column(Self, String) -> Array[Float?] raise OrcError
 pub fn OrcFile::read_int_column(Self, String) -> Array[Int64?] raise OrcError
 pub fn OrcFile::read_string_column(Self, String) -> Array[String?] raise OrcError
+pub fn OrcFile::read_timestamp_column(Self, String) -> Array[OrcTimestamp?] raise OrcError
+pub fn OrcFile::read_timestamp_instant_column(Self, String) -> Array[OrcTimestamp?] raise OrcError
+
+pub(all) struct OrcTimestamp {
+  seconds : Int64
+  nanosecond : Int
+}
 
 pub(all) struct OrcType {
   kind : Int

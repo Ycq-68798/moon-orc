@@ -1,4 +1,13 @@
 from pathlib import Path
+import os
+import sys
+# Apache ORC C++ needs an IANA timezone database even for GMT on Windows.
+if sys.platform == 'win32' and not os.environ.get('TZDIR'):
+    try:
+        import tzdata
+    except ImportError as exc:
+        raise RuntimeError('Install tzdata or set TZDIR to an IANA zoneinfo directory') from exc
+    os.environ['TZDIR'] = str(Path(tzdata.__file__).parent / 'zoneinfo')
 import json
 import math
 import struct
@@ -383,9 +392,97 @@ _put(ps, 1, len(new_footer))
 new_ps = _emit(ps)
 bad_binary_date_cases['date_range'] = bad_int[:footer_start] + new_footer + new_ps + bytes([len(new_ps)])
 
+
+# Arrow writes timezone-naive TIMESTAMP and timezone-aware TIMESTAMP_INSTANT.
+timestamp_values = [-9223372036000000000, -2000000000, -1000000000, 0, 1000000001, 1999999999, 1420070400000000000, 1420070400000000001, 9223372036854775807, None]
+timestamp_table = pa.table({
+    'wall': pa.array(timestamp_values, type=pa.timestamp('ns')),
+    'instant': pa.array(timestamp_values, type=pa.timestamp('ns', tz='Asia/Shanghai')),
+    'empty_wall': pa.array([None] * len(timestamp_values), type=pa.timestamp('ns')),
+    'empty_instant': pa.array([None] * len(timestamp_values), type=pa.timestamp('ns', tz='UTC')),
+})
+timestamp_cases = {}
+for version in ('0.11', '0.12'):
+    for codec in ('uncompressed', 'zlib', 'snappy'):
+        sink = pa.BufferOutputStream()
+        orc.write_table(timestamp_table, sink, compression=codec, file_version=version)
+        data = sink.getvalue().to_pybytes()
+        result = orc.read_table(pa.BufferReader(data))
+        for column in ('wall', 'instant'):
+            assert result.column(column).cast(pa.int64()).to_pylist() == timestamp_values
+        for column in ('empty_wall', 'empty_instant'):
+            assert result.column(column).null_count == len(timestamp_values)
+        timestamp_cases['v' + version.replace('.', '') + '_' + codec] = data
+multi_ts_values = [None if i % 7 == 0 else (i - 1000) * 1000000000 + ((i % 5) * 123456789 if i > 1000 else 0) for i in range(2000)]
+timestamp_multi_table = pa.table({
+    'wall': pa.array(multi_ts_values, type=pa.timestamp('ns')),
+    'instant': pa.array(multi_ts_values, type=pa.timestamp('ns', tz='UTC')),
+})
+for codec in ('uncompressed', 'zlib', 'snappy'):
+    sink = pa.BufferOutputStream()
+    source = timestamp_multi_table
+    if codec != 'uncompressed':
+        source = source.append_column('pad', pa.array([str(i) + ':' + 'x' * 64 for i in range(2000)]))
+    orc.write_table(source, sink, compression=codec, file_version='0.12', stripe_size=128, batch_size=256)
+    data = sink.getvalue().to_pybytes()
+    result = orc.read_table(pa.BufferReader(data))
+    for column in ('wall', 'instant'):
+        assert result.column(column).cast(pa.int64()).to_pylist() == multi_ts_values
+    assert orc.ORCFile(pa.BufferReader(data)).nstripes > 1
+    timestamp_cases['multi_' + codec] = data
+negative_fraction_values = [-1000000001, -1000000, -1, None]
+negative_fraction_table = pa.table({
+    'wall': pa.array(negative_fraction_values, type=pa.timestamp('ns')),
+    'instant': pa.array(negative_fraction_values, type=pa.timestamp('ns', tz='UTC')),
+})
+negative_fraction_cases = {}
+for version in ('0.11', '0.12'):
+    data = encode(negative_fraction_table, compression='uncompressed', file_version=version)
+    result = orc.read_table(pa.BufferReader(data))
+    for col in ('wall', 'instant'):
+        assert result.column(col).cast(pa.int64()).to_pylist() == negative_fraction_values
+    negative_fraction_cases['v' + version.replace('.', '')] = data
+def rewrite_timestamp_zone(data, zone):
+    ps_start = len(data) - 1 - data[-1]
+    ps = _fields(data[ps_start:-1])
+    footer_start = ps_start - _get(ps, 1)
+    footer = _fields(data[footer_start:ps_start])
+    stripe = _fields(_get(footer, 3))
+    offset, ilen, dlen, slen = (_get(stripe, n) for n in (1, 2, 3, 4))
+    start = offset + ilen + dlen
+    sf = _fields(data[start:start + slen])
+    if zone is None:
+        sf = [f for f in sf if f[0] != 3]
+    else:
+        _put(sf, 3, zone)
+    new_sf = _emit(sf)
+    _put(stripe, 4, len(new_sf))
+    _put(footer, 3, _emit(stripe))
+    _put(footer, 2, start + len(new_sf))
+    new_footer = _emit(footer)
+    _put(ps, 1, len(new_footer))
+    new_ps = _emit(ps)
+    return data[:start] + new_sf + data[start + slen:footer_start] + new_footer + new_ps + bytes([len(new_ps)])
+
+bad_timestamp_cases = {
+    'seconds': truncate_primitive_stream(timestamp_cases['v012_uncompressed'], 1, 1),
+    'nanos': truncate_primitive_stream(timestamp_cases['v012_uncompressed'], 1, 5),
+    'present': truncate_primitive_stream(timestamp_cases['v012_uncompressed'], 1, 0),
+    'non_utc': rewrite_timestamp_zone(timestamp_cases['v012_uncompressed'], b'America/New_York'),
+    'missing_zone': rewrite_timestamp_zone(timestamp_cases['v012_uncompressed'], None),
+    'epoch_fraction': encode(pa.table({'wall': pa.array([1], type=pa.timestamp('ns'))}), compression='uncompressed', file_version='0.12'),
+}
 out = '// Generated by generate_fixtures.py using Apache Arrow; do not hand-edit.\n'
 for name, data in [('fixture_11', v11), ('fixture_12', v12), ('fixture_zlib', zlib), ('fixture_zlib12', zlib12), ('fixture_long_gap', long_gap), ('fixture_snappy', snappy), ('fixture_snappy12', snappy12), ('fixture_zstd', zstd), ('fixture_multi', multi), ('fixture_zlib_multi', zlib_multi), ('fixture_zlib_v12_large', zlib_v12_large), ('fixture_snappy_v12_large', snappy_v12_large)]:
     out += f'\n///|\nfn {name}() -> Bytes {{\n  {literal(data)}\n}}\n'
+
+for name, data in timestamp_cases.items():
+    out += f'\n///|\nfn fixture_timestamp_{name}() -> Bytes {{\n  {literal(data)}\n}}\n'
+
+for name, data in negative_fraction_cases.items():
+    out += f'\n///|\nfn fixture_negative_timestamp_{name}() -> Bytes {{\n  {literal(data)}\n}}\n'
+for name, data in bad_timestamp_cases.items():
+    out += f'\n///|\nfn fixture_bad_timestamp_{name}() -> Bytes {{\n  {literal(data)}\n}}\n'
 
 for name, data in binary_date_cases.items():
     out += f'\n///|\nfn fixture_binary_date_{name}() -> Bytes {{\n  {literal(data)}\n}}\n'
@@ -482,6 +579,42 @@ test "reject truncated primitive streams" {
   assert_true(bad_bool && bad_present && bad_float && bad_double && bad_type && missing)
 }
 """
+for name in timestamp_cases:
+    if name.startswith('multi_'):
+        out += f"""
+///|
+test \"Apache Arrow timestamp {name}\" {{
+  let file = open(fixture_timestamp_{name}())
+  assert_true(file.stripes.length() > 1)
+  let wall = file.read_timestamp_column(\"wall\")
+  let instant = file.read_timestamp_instant_column(\"instant\")
+  for i in 0..<2000 {{
+    if i % 7 == 0 {{ assert_true(wall[i] is None); assert_true(instant[i] is None) }} else {{
+      match wall[i] {{ Some(value) => {{ assert_eq(value.seconds, Int64::from_int(i - 1000)); assert_eq(value.nanosecond, if i > 1000 {{ (i % 5) * 123456789 }} else {{ 0 }}) }}; None => fail(\"expected wall timestamp\") }}
+      match instant[i] {{ Some(value) => {{ assert_eq(value.seconds, Int64::from_int(i - 1000)); assert_eq(value.nanosecond, if i > 1000 {{ (i % 5) * 123456789 }} else {{ 0 }}) }}; None => fail(\"expected instant timestamp\") }}
+    }}
+  }}
+}}
+"""
+        continue
+    out += f"""
+///|
+test \"Apache Arrow timestamp {name}\" {{
+  let file = open(fixture_timestamp_{name}())
+  let wall = file.read_timestamp_column(\"wall\")
+  let instant = file.read_timestamp_instant_column(\"instant\")
+  let empty_wall = file.read_timestamp_column(\"empty_wall\")
+  let empty_instant = file.read_timestamp_instant_column(\"empty_instant\")
+  assert_true(empty_wall[0] is None && empty_instant[0] is None)
+"""
+    for i, val in enumerate(timestamp_values):
+        if val is None:
+            out += f'  assert_true(wall[{i}] is None && instant[{i}] is None)\n'
+        else:
+            sec, nanos = divmod(val, 1000000000)
+            for column in ('wall', 'instant'):
+                out += f'  match {column}[{i}] {{ Some(value) => {{ assert_eq(value.seconds, {sec}L); assert_eq(value.nanosecond, {nanos}) }}; None => fail(\"expected timestamp\") }}\n'
+    out += '}\n'
 for name in binary_date_cases:
     if name.startswith('multi_'):
         out += f"""

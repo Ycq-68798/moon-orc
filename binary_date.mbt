@@ -67,6 +67,7 @@ pub fn OrcFile::read_binary_column(
 
 ///|
 /// Read a top-level DATE column as signed days since 1970-01-01 UTC.
+/// The raw on-disk day values are returned without calendar conversion.
 /// The result preserves nulls and is restricted to the signed 32-bit range.
 pub fn OrcFile::read_date_column(
   file : OrcFile,
