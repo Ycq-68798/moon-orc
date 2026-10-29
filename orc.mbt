@@ -19,6 +19,8 @@ pub(all) struct OrcType {
 ///|
 pub struct OrcFile {
   bytes : Bytes
+  compression : Int
+  block_size : Int
   rows : Int
   stripes : Array[Stripe]
   types : Array[OrcType]
@@ -48,7 +50,7 @@ fn parse_type(data : Bytes) -> OrcType raise OrcError {
 }
 
 ///|
-/// Parse an uncompressed ORC file from bytes, exposing the schema and stripes.
+/// Parse an uncompressed or ZLIB-compressed ORC file from bytes.
 pub fn open(data : Bytes) -> OrcFile raise OrcError {
   let len = data.length()
   if len < 4 || data[0] != b'O' || data[1] != b'R' || data[2] != b'C' {
@@ -60,15 +62,25 @@ pub fn open(data : Bytes) -> OrcFile raise OrcError {
   }
   let ps_start = len - 1 - ps_len
   let ps = fields(data[ps_start:len - 1].to_owned())
-  if number(ps, 2, 0) != 0 {
-    raise Invalid("compression is not supported")
+  let compression = number(ps, 2, 0)
+  if compression != 0 && compression != 1 {
+    raise Invalid("unsupported compression codec")
+  }
+  let block_size = number(ps, 3, 262144)
+  if compression == 1 && (block_size <= 0 || block_size > 8 * 1024 * 1024) {
+    raise Invalid("invalid compression block size")
   }
   let footer_len = number(ps, 1, -1)
   if footer_len < 0 || footer_len > ps_start - 3 {
     raise Invalid("invalid footer length")
   }
   let footer_start = ps_start - footer_len
-  let footer = fields(data[footer_start:ps_start].to_owned())
+  let footer_data = decompress_stream(
+    data[footer_start:ps_start].to_owned(),
+    compression,
+    block_size,
+  )
+  let footer = fields(footer_data)
   let stripes = []
   let types = []
   for f in footer {
@@ -125,5 +137,5 @@ pub fn open(data : Bytes) -> OrcFile raise OrcError {
       raise Invalid("invalid stripe row count")
     }
   }
-  { bytes: data, rows, stripes, types, }
+  { bytes: data, compression, block_size, rows, stripes, types, }
 }

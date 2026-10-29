@@ -23,8 +23,9 @@ keywords = [ ]
 
 preferred_target = "wasm"
 
-description = "Uncompressed ORC metadata and integer column reader"
+description = "ORC metadata and integer reader with uncompressed and ZLIB support"
 
 import {
   "moonbitlang/x@0.5.5",
+  "mizchi/zlib@0.4.10",
 }

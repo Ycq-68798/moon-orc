@@ -101,7 +101,12 @@ fn streams(
   stripe : Stripe,
 ) -> (Array[Stream], Array[Int]) raise OrcError {
   let start = stripe.offset + stripe.index_length + stripe.data_length
-  let sf = fields(file.bytes[start:start + stripe.footer_length].to_owned())
+  let footer = decompress_stream(
+    file.bytes[start:start + stripe.footer_length].to_owned(),
+    file.compression,
+    file.block_size,
+  )
+  let sf = fields(footer)
   let result = []
   let encodings = []
   let mut offset = stripe.offset
@@ -137,10 +142,11 @@ fn get_stream(
   streams : Array[Stream],
   column : Int,
   kind : Int,
-) -> Bytes? {
+) -> Bytes? raise OrcError {
   for s in streams {
     if s.column == column && s.kind == kind {
-      return Some(file.bytes[s.offset:s.offset + s.length].to_owned())
+      let raw = file.bytes[s.offset:s.offset + s.length].to_owned()
+      return Some(decompress_stream(raw, file.compression, file.block_size))
     }
   }
   None

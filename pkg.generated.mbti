@@ -12,6 +12,8 @@ pub suberror OrcError {
 // Types and methods
 pub struct OrcFile {
   bytes : Bytes
+  compression : Int
+  block_size : Int
   rows : Int
   stripes : Array[Stripe]
   types : Array[OrcType]

@@ -1,13 +1,13 @@
 # Moon ORC
 
-A MoonBit reader for a deliberately limited, interoperable subset of Apache ORC. It parses an uncompressed file's schema and stripe directory and projects a named top-level integer column, preserving nulls.
+A MoonBit reader for a deliberately limited, interoperable subset of Apache ORC. It parses an uncompressed or ZLIB-compressed file's schema and stripe directory and projects a named top-level integer column, preserving nulls.
 
 ## Current support
 
-- In-memory `Bytes` input; uncompressed, unencrypted ORC only. File and stripe metadata use protobuf.
+- In-memory `Bytes` input; uncompressed or ZLIB-compressed, unencrypted ORC. File and stripe metadata use protobuf.
 - `BYTE` (signed 8-bit), `SHORT`, `INT`, and `LONG`, returned as nullable `Int64` values. Byte RLE is supported for ORC 0.11 and 0.12; other integers require direct RLEv1 (ORC 0.11). Multiple stripes and all-null columns are supported.
 - File size/offsets and row counts are currently limited to signed 32-bit values; row count is limited to 10 million while reading is in-memory.
-- Zlib/Snappy and other compression, RLEv2 integers, strings, nested data, predicate pushdown, writing and encrypted data are not implemented. Unsupported cases return `OrcError`.
+- Snappy, Zstandard and other compression codecs, RLEv2 integers, strings, nested data, predicate pushdown, writing and encrypted data are not implemented. Unsupported cases return `OrcError`.
 
 ```moonbit nocheck
 // Within a package that imports the module as @orc, obtain the bytes using
@@ -22,13 +22,14 @@ fn read_order_ids(bytes : Bytes) -> Array[Int64?] raise {
 
 The MoonBit module is `Ycq-68798/moon-orc`. In a package that depends on this module, add the following to `moon.pkg`:
 
-```moonbit
+```moonbit nocheck
+///|
 import {
   "Ycq-68798/moon-orc" @orc,
 }
 ```
 
-The project has not yet been published to Mooncakes; the repository can be cloned to run its examples and tests.
+The repository can be cloned to run its examples and tests.
 
 ## Verify
 
@@ -38,9 +39,9 @@ moon test --target all
 moon run cmd/main --target native -- sample.orc
 ```
 
-The CLI reports the row count, stripe count and top-level schema of an uncompressed ORC file. `sample.orc` is an Apache Arrow-generated fixture included in this repository. The executable uses `moonbitlang/x/fs`; the core reader accepts in-memory bytes.
+The CLI reports the row count, stripe count and top-level schema of an uncompressed or ZLIB-compressed ORC file. `sample.orc` is an Apache Arrow-generated fixture included in this repository. The executable uses `moonbitlang/x/fs`; the core reader accepts in-memory bytes and uses `mizchi/zlib` for DEFLATE decompression. A compressed block may expand to at most 8 MiB, and a decompressed stream is limited to 64 MiB.
 
-`interop_wbtest.mbt` contains files generated and independently read by Apache Arrow / PyArrow 26.0.0. They check signed 8/16/32/64-bit values, nulls, the minimum and maximum 64-bit integers, 20 stripes, projection, and rejection of compression and unsupported RLEv2. `sample.orc` and the embedded test fixtures can be regenerated with Python and `pyarrow==26.0.0`:
+`interop_wbtest.mbt` contains files generated and independently read by Apache Arrow / PyArrow 26.0.0. They check signed 8/16/32/64-bit values, nulls, the minimum and maximum 64-bit integers, 20 stripes, projection, ZLIB-compressed footers and column streams, a 300,000-row multi-block ZLIB file, and rejection of unsupported RLEv2. `sample.orc` and the embedded test fixtures can be regenerated with Python and `pyarrow==26.0.0`:
 
 ```shell
 python generate_fixtures.py
