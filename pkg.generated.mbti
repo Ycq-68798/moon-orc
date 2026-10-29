@@ -18,7 +18,9 @@ pub struct OrcFile {
   stripes : Array[Stripe]
   types : Array[OrcType]
 }
+pub fn OrcFile::read_binary_column(Self, String) -> Array[Bytes?] raise OrcError
 pub fn OrcFile::read_bool_column(Self, String) -> Array[Bool?] raise OrcError
+pub fn OrcFile::read_date_column(Self, String) -> Array[Int?] raise OrcError
 pub fn OrcFile::read_double_column(Self, String) -> Array[Double?] raise OrcError
 pub fn OrcFile::read_float_column(Self, String) -> Array[Float?] raise OrcError
 pub fn OrcFile::read_int_column(Self, String) -> Array[Int64?] raise OrcError
