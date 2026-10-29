@@ -25,3 +25,20 @@ jobs:
           moon test --target all
       - name: Inspect the sample file
         run: moon run cmd/main --target native -- sample.orc
+      - name: Set up Python for fixture regeneration
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyArrow
+        run: python -m pip install --only-binary=:all: pyarrow==26.0.0
+      - name: Regenerate and test fixtures in an isolated copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_dir=$(mktemp -d)
+          trap 'rm -rf "$fixture_dir"' EXIT
+          git archive HEAD | tar -x -C "$fixture_dir"
+          cd "$fixture_dir"
+          python generate_fixtures.py
+          moon update
+          moon test --target all
