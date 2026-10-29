@@ -26,7 +26,7 @@ jobs:
       - name: Inspect the sample file
         run: moon run cmd/main --target native -- sample.orc
       - name: Set up Python for fixture regeneration
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install PyArrow
