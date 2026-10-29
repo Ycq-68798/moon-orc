@@ -102,8 +102,7 @@ test "Snappy raw blocks handle literal and all copy token forms" {
   let copy2 : Bytes = [5, 0, b'a', 14, 1, 0]
   let copy4 : Bytes = [5, 0, b'a', 15, 1, 0, 0, 0]
   for block in [copy1, copy2, copy4] {
-    validate_snappy(block, 5)
-    assert_eq(@snappy.decompress(block), b"aaaaa")
+    assert_eq(decode_snappy(block, 5), b"aaaaa")
   }
 }
 
@@ -120,7 +119,7 @@ test "Snappy rejects malformed and oversized blocks" {
     [0x80, 0x80, 0x80, 0x01], // advertised output larger than limit
   ]
   for block in cases {
-    let rejected = try validate_snappy(block, 10) catch {
+    let rejected = try decode_snappy(block, 10) catch {
       Invalid(_) => true
     } noraise {
       _ => false

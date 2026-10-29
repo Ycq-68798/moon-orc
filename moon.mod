@@ -28,5 +28,4 @@ description = "ORC integer and string reader with ZLIB and Snappy support"
 import {
   "moonbitlang/x@0.5.5",
   "mizchi/zlib@0.4.10",
-  "bikallem/compress@0.3.4",
 }

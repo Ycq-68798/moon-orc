@@ -36,10 +36,7 @@ fn decompress_stream(
         _ => raise Invalid("invalid or oversized DEFLATE block")
       }
     } else {
-      validate_snappy(payload, block_size)
-      @snappy.decompress(payload) catch {
-        _ => raise Invalid("invalid Snappy block")
-      }
+      decode_snappy(payload, block_size)
     }
     if block.length() > max_stream - output.length() {
       raise Invalid("decompressed stream exceeds 64 MiB limit")
@@ -52,17 +49,16 @@ fn decompress_stream(
 }
 
 ///|
-// Verify the raw Snappy stream before calling the decompressor. The encoded
-// size prefix is checked before any output allocation; every token is bounded,
-// including four-byte literals, and the entire block must be consumed.
-fn validate_snappy(data : Bytes, block_size : Int) -> Unit raise OrcError {
+// Decode a raw Snappy block; bound the announced size before allocating and
+// check each literal and copy range, including overlapping copies.
+fn decode_snappy(data : Bytes, block_size : Int) -> Bytes raise OrcError {
   let c = Cursor::{ data, pos: 0, }
   let expected = c.varint()
-  if expected > block_size.to_uint64() {
+  if block_size < 0 || expected > block_size.to_uint64() {
     raise Invalid("Snappy block exceeds declared size")
   }
-  let mut written = 0UL
-  while written < expected {
+  let out : Array[Byte] = []
+  while out.length().to_uint64() < expected {
     let tag = c.byte()
     let tag_type = tag & 3
     if tag_type == 0 {
@@ -70,19 +66,20 @@ fn validate_snappy(data : Bytes, block_size : Int) -> Unit raise OrcError {
       let length = if prefix < 60 {
         (prefix + 1).to_uint64()
       } else {
-        let mut length_minus_one = 0UL
+        let mut n = 0UL
         for i in 0..<(prefix - 59) {
-          length_minus_one = length_minus_one |
-            (c.byte().to_uint64() << (8 * i))
+          n = n | (c.byte().to_uint64() << (8 * i))
         }
-        length_minus_one + 1UL
+        n + 1UL
       }
-      if length > expected - written ||
+      if length > expected - out.length().to_uint64() ||
         length > (data.length() - c.pos).to_uint64() {
         raise Invalid("invalid Snappy literal length")
       }
-      c.pos += length.to_int()
-      written += length
+      for _ in 0..<length.to_int() {
+        out.push(c.data[c.pos])
+        c.pos += 1
+      }
     } else {
       let (length, offset) = if tag_type == 1 {
         (((tag >> 2) & 7) + 4, ((tag >> 5 << 8) | c.byte()).to_uint64())
@@ -96,14 +93,18 @@ fn validate_snappy(data : Bytes, block_size : Int) -> Unit raise OrcError {
         ((tag >> 2) + 1, offset)
       }
       if offset == 0UL ||
-        offset > written ||
-        length.to_uint64() > expected - written {
+        offset > out.length().to_uint64() ||
+        length.to_uint64() > expected - out.length().to_uint64() {
         raise Invalid("invalid Snappy copy")
       }
-      written += length.to_uint64()
+      let distance = offset.to_int()
+      for _ in 0..<length {
+        out.push(out[out.length() - distance])
+      }
     }
   }
   if c.pos != data.length() {
     raise Invalid("trailing data in Snappy block")
   }
+  Bytes::from_array(out)
 }
