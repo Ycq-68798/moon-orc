@@ -23,7 +23,7 @@ keywords = [ ]
 
 preferred_target = "wasm"
 
-description = "ORC metadata and integer reader with uncompressed and ZLIB support"
+description = "ORC integer and string reader with uncompressed and ZLIB support"
 
 import {
   "moonbitlang/x@0.5.5",

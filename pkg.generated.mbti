@@ -19,6 +19,7 @@ pub struct OrcFile {
   types : Array[OrcType]
 }
 pub fn OrcFile::read_int_column(Self, String) -> Array[Int64?] raise OrcError
+pub fn OrcFile::read_string_column(Self, String) -> Array[String?] raise OrcError
 
 pub(all) struct OrcType {
   kind : Int

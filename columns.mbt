@@ -1,4 +1,10 @@
 ///|
+priv struct ColumnEncoding {
+  kind : Int
+  dictionary_size : Int
+}
+
+///|
 priv struct Stream {
   kind : Int
   column : Int
@@ -56,7 +62,11 @@ fn zigzag(n : UInt64) -> Int64 {
 }
 
 ///|
-fn int_rle(data : Bytes, count : Int) -> Array[Int64] raise OrcError {
+fn int_rle(
+  data : Bytes,
+  count : Int,
+  signed? : Bool = true,
+) -> Array[Int64] raise OrcError {
   let c = Cursor::{ data, pos: 0, }
   let out = []
   while c.pos < data.length() {
@@ -74,18 +84,22 @@ fn int_rle(data : Bytes, count : Int) -> Array[Int64] raise OrcError {
           raw_delta
         },
       )
-      let start = zigzag(c.varint())
+      let start = decode_rle_integer(c.varint(), signed)
       for i in 0..<n {
         let diff = delta * Int64::from_int(i)
         if (diff > 0L && start > 9223372036854775807L - diff) ||
           (diff < 0L && start < -9223372036854775808L - diff) {
           raise Invalid("integer RLE overflows Int64")
         }
-        out.push(start + diff)
+        let value = start + diff
+        if !signed && value < 0L {
+          raise Invalid("negative unsigned RLE value")
+        }
+        out.push(value)
       }
     } else {
       for _ in 0..<n {
-        out.push(zigzag(c.varint()))
+        out.push(decode_rle_integer(c.varint(), signed))
       }
     }
   }
@@ -99,7 +113,7 @@ fn int_rle(data : Bytes, count : Int) -> Array[Int64] raise OrcError {
 fn streams(
   file : OrcFile,
   stripe : Stripe,
-) -> (Array[Stream], Array[Int]) raise OrcError {
+) -> (Array[Stream], Array[ColumnEncoding]) raise OrcError {
   let start = stripe.offset + stripe.index_length + stripe.data_length
   let footer = decompress_stream(
     file.bytes[start:start + stripe.footer_length].to_owned(),
@@ -125,7 +139,11 @@ fn streams(
       })
       offset += length
     } else if f.number == 2 && f.wire == 2 {
-      encodings.push(number(fields(f.bytes), 1, -1))
+      let encoding = fields(f.bytes)
+      encodings.push({
+        kind: number(encoding, 1, -1),
+        dictionary_size: number(encoding, 2, 0),
+      })
     } else if f.number == 4 {
       raise Invalid("encrypted stripes are not supported")
     }
@@ -186,7 +204,7 @@ pub fn OrcFile::read_int_column(
     if column >= encodings.length() {
       raise Invalid("missing column encoding")
     }
-    if encodings[column] != 0 && encodings[column] != 2 {
+    if encodings[column].kind != 0 && encodings[column].kind != 2 {
       raise Invalid("unsupported integer column encoding")
     }
     let present = match get_stream(file, ss, column, 0) {
@@ -208,7 +226,7 @@ pub fn OrcFile::read_int_column(
       [
         for v in raw => Int64::from_int(if v >= 128 { v - 256 } else { v })
       ]
-    } else if encodings[column] == 0 {
+    } else if encodings[column].kind == 0 {
       int_rle(data, count)
     } else {
       int_rle_v2(data, count)
@@ -227,4 +245,16 @@ pub fn OrcFile::read_int_column(
     raise Invalid("stripe row count does not match footer")
   }
   out
+}
+
+///|
+fn decode_rle_integer(raw : UInt64, signed : Bool) -> Int64 raise OrcError {
+  if signed {
+    zigzag(raw)
+  } else {
+    if raw > 9223372036854775807UL {
+      raise Invalid("unsigned RLE value exceeds Int64")
+    }
+    raw.reinterpret_as_int64()
+  }
 }

@@ -77,7 +77,11 @@ fn add_signed(base : Int64, delta : Int64) -> Int64 raise OrcError {
 }
 
 ///|
-fn int_rle_v2(data : Bytes, count : Int) -> Array[Int64] raise OrcError {
+fn int_rle_v2(
+  data : Bytes,
+  count : Int,
+  signed? : Bool = true,
+) -> Array[Int64] raise OrcError {
   let c = Cursor::{ data, pos: 0, }
   let out : Array[Int64] = []
   while c.pos < data.length() {
@@ -93,7 +97,7 @@ fn int_rle_v2(data : Bytes, count : Int) -> Array[Int64] raise OrcError {
       for _ in 0..<width {
         raw = (raw << 8) | c.byte().to_uint64()
       }
-      let value = zigzag(raw)
+      let value = decode_rle_integer(raw, signed)
       for _ in 0..<len {
         out.push(value)
       }
@@ -108,11 +112,11 @@ fn int_rle_v2(data : Bytes, count : Int) -> Array[Int64] raise OrcError {
       let bits = BitReader::{ cursor: c, byte: 0, left: 0, }
       let width = rle_width(encoded_width)
       for _ in 0..<len {
-        out.push(zigzag(bits.read(width)))
+        out.push(decode_rle_integer(bits.read(width), signed))
       }
     } else if kind == 3 {
       let width = if encoded_width == 0 { 0 } else { rle_width(encoded_width) }
-      let base = zigzag(c.varint())
+      let base = decode_rle_integer(c.varint(), signed)
       let delta = zigzag(c.varint())
       out.push(base)
       if len > 1 {
@@ -201,6 +205,13 @@ fn int_rle_v2(data : Bytes, count : Int) -> Array[Int64] raise OrcError {
   }
   if out.length() != count {
     raise Invalid("incorrect RLEv2 stream length")
+  }
+  if !signed {
+    for value in out {
+      if value < 0L {
+        raise Invalid("negative unsigned RLE value")
+      }
+    }
   }
   out
 }
