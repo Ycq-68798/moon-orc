@@ -31,6 +31,7 @@ pub struct OrcFile {
   decimal_scale : Array[Int]
 }
 pub fn OrcFile::read_binary_column(Self, String) -> Array[Bytes?] raise OrcError
+pub fn OrcFile::read_binary_list_column(Self, String) -> Array[Array[Bytes?]?] raise OrcError
 pub fn OrcFile::read_bool_column(Self, String) -> Array[Bool?] raise OrcError
 pub fn OrcFile::read_date_column(Self, String) -> Array[Int?] raise OrcError
 pub fn OrcFile::read_decimal128_column(Self, String) -> Array[OrcDecimal128?] raise OrcError

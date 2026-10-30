@@ -1,12 +1,12 @@
 # Moon ORC
 
-A MoonBit reader for a deliberately limited, interoperable subset of Apache ORC. It parses an uncompressed, ZLIB-compressed or Snappy-compressed file's schema and stripe directory and projects named top-level integer, integer-list, string-list, string, binary, date, timestamp, decimal, boolean and floating-point columns, preserving nulls.
+A MoonBit reader for a deliberately limited, interoperable subset of Apache ORC. It parses an uncompressed, ZLIB-compressed or Snappy-compressed file's schema and stripe directory and projects named top-level integer, integer-list, string-list, binary-list, string, binary, date, timestamp, decimal, boolean and floating-point columns, preserving nulls.
 
 ## Current support
 
 - In-memory `Bytes` input; uncompressed, ZLIB-compressed or Snappy-compressed, unencrypted ORC. File and stripe metadata use protobuf.
 - `BYTE` (signed 8-bit), `SHORT`, `INT`, and `LONG`, returned as nullable `Int64` values. Byte RLE and direct integer RLEv1 / RLEv2 are supported, including short repeat, direct, delta and patched base. Multiple stripes and all-null columns are supported.
-- Top-level `LIST<BYTE>`, `LIST<SHORT>`, `LIST<INT>`, and `LIST<LONG>` via `read_int_list_column`, returning nullable lists of nullable `Int64` values. Null lists, empty lists and null elements are distinct. `LIST<STRING>` is available via `read_string_list_column` with direct and dictionary encoding; empty strings and strictly decoded UTF-8 text are preserved. At most 10 million total elements per projected list column are decoded across the file.
+- Top-level `LIST<BYTE>`, `LIST<SHORT>`, `LIST<INT>`, and `LIST<LONG>` via `read_int_list_column`, returning nullable lists of nullable `Int64` values. Null lists, empty lists and null elements are distinct. `LIST<STRING>` is available via `read_string_list_column` with direct and dictionary encoding; empty strings and strictly decoded UTF-8 text are preserved. `read_binary_list_column` reads `LIST<BINARY>` without UTF-8 conversion, preserving empty byte strings and null elements. At most 10 million total elements per projected list column are decoded across the file.
 - `STRING`, `VARCHAR`, and `CHAR` with direct and dictionary encoding in ORC 0.11 and 0.12. Text is decoded as strict UTF-8 and returned as stored, including trailing spaces and an initial U+FEFF; CHAR padding and declared maximum length are not applied or enforced.
 - `BINARY` returns nullable `Bytes` without UTF-8 conversion; empty bytes and null are distinct. `DATE` returns nullable `Int` as raw signed days since 1970-01-01 (UTC), limited to the signed 32-bit range. The file calendar is not parsed or converted; historical dates can differ from readers that convert between the hybrid Julian/Gregorian and proleptic Gregorian calendars.
 - `TIMESTAMP` and `TIMESTAMP_INSTANT` return nullable `OrcTimestamp` values with separate floor seconds and nanoseconds (0–999,999,999). TIMESTAMP is a wall-clock value represented as seconds since 1970-01-01 as if UTC; it accepts only stripes whose writer timezone is UTC, GMT, Etc/UTC or Etc/GMT; a missing or other writer timezone is rejected. TIMESTAMP_INSTANT is a UTC instant and does not depend on the writer timezone. Fractional timestamps before 1970 and within the first second of 1970 are rejected because legacy producers can encode those values ambiguously; whole seconds before 1970 are supported back to 1582-10-15. Earlier timestamps are rejected because historical calendar conversion is not implemented. The exact 1582 cutoff has not been tested against an independent timestamp writer. Files with wrapped negative nanosecond values are rejected.
@@ -29,6 +29,12 @@ fn read_order_ids(bytes : Bytes) -> Array[Int64?] raise {
 fn read_customer_names(bytes : Bytes) -> Array[String?] raise {
   let file = @orc.open(bytes)
   file.read_string_column("customer_name")
+}
+
+///|
+fn read_binary_items(bytes : Bytes) -> Array[Array[Bytes?]?] raise {
+  let file = @orc.open(bytes)
+  file.read_binary_list_column("items")
 }
 ```
 
@@ -61,6 +67,8 @@ On Windows, timestamp fixture generation also requires the `tzdata` Python packa
 python generate_fixtures.py
 moon test --target all
 ```
+
+Binary LIST coverage uses independently read PyArrow files in ORC 0.11 and 0.12, with uncompressed, ZLIB and Snappy streams, multiple stripes, all byte values, nulls and empty values. Malformed presence, length and data streams are rejected.
 
 With PyArrow 26.0.0, the following writer/reader round trip returned `1024` at position 510 rather than the original `1000000000` on the test machine. The test suite therefore uses the independently read synthetic long-gap fixture described above for this boundary:
 
